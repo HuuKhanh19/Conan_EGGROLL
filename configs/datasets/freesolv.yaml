@@ -1,0 +1,17 @@
+# FreeSolv Dataset Configuration
+
+dataset:
+  name: "freesolv"
+  file: "refined_FreeSolv.csv"
+  smiles_column: "smiles"
+  target_column: "measured"
+  task_type: "regression"
+  metric: "rmse"
+
+# EGGROLL settings for this dataset
+eggroll:
+  batch_size: 64  # 64/508 = 12.6% of training data (smaller dataset)
+  
+# Expected baseline performance
+expected:
+  rmse: 1.50

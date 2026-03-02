@@ -1,0 +1,17 @@
+# BACE Dataset Configuration
+
+dataset:
+  name: "bace"
+  file: "refined_BACE.csv"
+  smiles_column: "smiles"
+  target_column: "class"
+  task_type: "classification"
+  metric: "auc"
+
+# EGGROLL settings for this dataset
+eggroll:
+  batch_size: 128  # 128/1210 = 10.6% of training data
+  
+# Expected baseline performance
+expected:
+  auc: 0.82

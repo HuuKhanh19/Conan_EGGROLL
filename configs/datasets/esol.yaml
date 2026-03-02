@@ -1,0 +1,17 @@
+# ESOL Dataset Configuration
+
+dataset:
+  name: "esol"
+  file: "refined_ESOL.csv"
+  smiles_column: "smiles"
+  target_column: "measured"
+  task_type: "regression"
+  metric: "rmse"
+
+# EGGROLL settings for this dataset
+eggroll:
+  batch_size: 512  # 128/892 = 14% of training data
+  
+# Expected baseline performance
+expected:
+  rmse: 0.80
