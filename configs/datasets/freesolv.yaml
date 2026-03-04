@@ -8,9 +8,9 @@ dataset:
   task_type: "regression"
   metric: "rmse"
 
-# EGGROLL settings for this dataset
-eggroll:
-  batch_size: 64  # 64/508 = 12.6% of training data (smaller dataset)
+# EGGROLL settings for this dataset (optional overrides)
+# Full-batch mode: uses entire training set (~508 samples)
+# No batch_size needed - removed for full-batch training
   
 # Expected baseline performance
 expected:

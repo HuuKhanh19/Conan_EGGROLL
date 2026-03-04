@@ -21,36 +21,36 @@ training:
   early_stopping_patience: 10
   save_checkpoints: true
 
-# EGGROLL settings (Step 2) - TUNED VALUES
+# EGGROLL settings (Step 2) - TUNED VALUES FOR FULL-BATCH
 # KEY LEARNINGS:
 # - sigma: 0.01 is correct for pretrained 47M param models (0.05 destroys weights!)
-# - population_size: 512 gives much better gradient estimates than 128
-# - rank: 1 is sufficient when N×r >= 512 (max layer dim)
-# - rank_transform: critical for stability with mini-batch noise
+# - Full-batch provides more stable gradient estimates than mini-batch
+# - rank_transform: critical for stability with noisy fitness
 # - num_generations: 400 needed, model still improving at 200
+# - lr_decay/sigma_decay: 0.99 helps convergence
 #
 eggroll:
   # Core parameters - TUNED
-  population_size: 16     # N: larger = better gradient estimate
-  rank: 32                  # r: N×r=512 >= max_layer_dim, sufficient for full-rank
-  sigma: 0.01              # σ: KEEP SMALL for pretrained models!
-  learning_rate: 0.1      # α: works well with rank_transform
-  
+  population_size: 32     # N: balance gradient quality and speed
+  rank: 16                # r: N*r=512 >= max_layer_dim for full-rank
+  sigma: 0.01             # σ: KEEP SMALL for pretrained models!
+  learning_rate: 0.1      # α: works well with rank_transform + decay
+
   # Training
-  num_generations: 400     # Increased from 200 (model still improving)
-  batch_size: 128          # Mini-batch size for fitness evaluation
-  use_antithetic: true     # Use mirrored sampling (±ε)
-  
+  num_generations: 400    # Max generations (early stopping usually triggers)
+  use_antithetic: true    # Mirrored sampling (±ε) for variance reduction
+  eval_chunk_size: 64     # Forward pass chunk size (OOM prevention)
+
   # Fitness shaping - CRITICAL for stability
-  normalize_fitness: true  # Z-score normalization (fallback)
-  rank_transform: true     # ENABLED - prevents outlier domination
-  centered_rank: true      # Center ranks around 0 [-0.5, 0.5]
-  
+  normalize_fitness: true  # Z-score (fallback)
+  rank_transform: true     # PRIMARY - prevents outlier domination
+  centered_rank: true      # [-0.5, 0.5]
+
   # Decay & patience
-  weight_decay: 0.0        # L2 regularization
-  lr_decay: 0.99          # Slight LR decay per generation
-  sigma_decay: 0.99       # Slight sigma decay per generation
-  patience: 200            # Increased from 50 (allow more exploration)
+  weight_decay: 0.0
+  lr_decay: 0.99          # Gradual LR annealing
+  sigma_decay: 0.99       # Gradual sigma annealing
+  patience: 200
 
 # GP settings (Step 3 Co-evolution)
 gp:

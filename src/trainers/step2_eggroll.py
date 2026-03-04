@@ -4,8 +4,8 @@ Step 2 Trainer: UniMol with EGGROLL Evolution Strategies
 This module replaces gradient descent with EGGROLL for training UniMol models.
 Trains end-to-end: UniMol encoder + MLP head.
 
-Training uses mini-batch fitness evaluation for speed.
-Validation uses full evaluation for accurate early stopping.
+UPDATED: Uses full-batch fitness evaluation for both training and validation.
+Full-batch provides more stable gradient estimates than mini-batch for ES.
 """
 
 import os
@@ -32,26 +32,26 @@ class Step2Config:
     task_type: str = "regression"  # 'regression' or 'classification'
     metric: str = "rmse"  # 'rmse', 'mse', or 'auc'
     
-    # EGGROLL hyperparameters (tuned values)
-    population_size: int = 256      # N: number of perturbations
-    rank: int = 8                   # r: perturbation rank
-    sigma: float = 0.02             # σ: noise scale (tuned)
-    learning_rate: float = 0.02     # α: update step size (tuned)
-    num_generations: int = 400      # Training generations (tuned)
+    # EGGROLL hyperparameters (TUNED for full-batch)
+    population_size: int = 32       # N: number of perturbations (tuned)
+    rank: int = 16                  # r: perturbation rank (N*r=512 for full-rank)
+    sigma: float = 0.01             # σ: noise scale (KEEP SMALL for pretrained!)
+    learning_rate: float = 0.1      # α: update step size (tuned)
+    num_generations: int = 400      # Training generations
     
-    # Training settings
-    batch_size: int = 256           # Batch size for fitness evaluation
+    # Training settings (FULL-BATCH)
+    eval_chunk_size: int = 64       # Chunk size for forward pass (OOM prevention)
     use_antithetic: bool = True     # Mirrored sampling
-    normalize_fitness: bool = True  # Normalize fitness scores (z-score)
-    rank_transform: bool = False    # Use rank-based fitness shaping (more stable)
-    centered_rank: bool = True      # Center ranks around 0 (for rank_transform)
+    normalize_fitness: bool = True  # Normalize fitness scores (z-score fallback)
+    rank_transform: bool = True     # ENABLED - prevents outlier domination
+    centered_rank: bool = True      # Center ranks around 0 [-0.5, 0.5]
     weight_decay: float = 0.0       # L2 regularization
-    lr_decay: float = 1.0           # LR decay per generation
-    sigma_decay: float = 1.0        # Sigma decay per generation
-    patience: int = 80              # Early stopping patience (tuned)
+    lr_decay: float = 0.99          # LR decay per generation (tuned)
+    sigma_decay: float = 0.99       # Sigma decay per generation (tuned)
+    patience: int = 200             # Early stopping patience (tuned)
     
     # Paths
-    step1_model_path: str = ""      # Path to Step 1 trained model
+    step1_model_path: str = ""      # Path to Step 1 trained model (reference only)
     output_dir: str = "./experiments/step2_eggroll"
     
     # Hardware
@@ -67,6 +67,8 @@ class UniMolEGGROLLWrapper:
     1. Loads a pretrained UniMol model (same starting point as Step 1)
     2. Handles fitness evaluation for regression/classification
     3. Manages EGGROLL optimization
+    
+    UPDATED: Uses full-batch evaluation for stable gradient estimates.
     """
     
     def __init__(
@@ -204,102 +206,25 @@ class UniMolEGGROLLWrapper:
         
         return batch_dict, targets
     
-    def create_fitness_function(
-        self,
-        batch_dict: Dict[str, torch.Tensor],
-        targets: torch.Tensor,
-        batch_size: int = 128
-    ) -> Callable:
-        """
-        Create mini-batch fitness function for EGGROLL training.
-        
-        Samples a random mini-batch for each fitness evaluation.
-        This provides fast, noisy but unbiased gradient estimates.
-        
-        Args:
-            batch_dict: Dict with all data tensors
-            targets: All target values
-            batch_size: Size of mini-batch for each fitness evaluation
-            
-        Returns:
-            Fitness function that samples and evaluates on mini-batch
-        """
-        # Move to device
-        batch_dict = {k: v.to(self.device) for k, v in batch_dict.items()}
-        targets = targets.to(self.device)
-        
-        n_samples = len(targets)
-        
-        # Create index generator for random sampling
-        def get_random_indices():
-            return torch.randperm(n_samples, device=self.device)[:batch_size]
-        
-        if self.config.task_type == 'regression':
-            def fitness_fn(model, data):
-                """Regression fitness: -MSE on mini-batch."""
-                model.eval()
-                
-                # Sample random mini-batch
-                idx = get_random_indices()
-                
-                with torch.no_grad():
-                    output = model(
-                        batch_dict['src_tokens'][idx],
-                        batch_dict['src_distance'][idx],
-                        batch_dict['src_coord'][idx],
-                        batch_dict['src_edge_type'][idx]
-                    )
-                    pred = output.squeeze(-1)
-                    mse = torch.mean((pred - targets[idx]) ** 2)
-                    return -mse.item()
-            
-        else:  # classification
-            def fitness_fn(model, data):
-                """Classification fitness: AUC on mini-batch."""
-                model.eval()
-                
-                idx = get_random_indices()
-                
-                with torch.no_grad():
-                    output = model(
-                        batch_dict['src_tokens'][idx],
-                        batch_dict['src_distance'][idx],
-                        batch_dict['src_coord'][idx],
-                        batch_dict['src_edge_type'][idx]
-                    )
-                    pred = output.squeeze(-1)
-                    prob = torch.sigmoid(pred)
-                    
-                    try:
-                        auc = roc_auc_score(
-                            targets[idx].cpu().numpy(), 
-                            prob.cpu().numpy()
-                        )
-                        return auc
-                    except:
-                        return 0.5
-        
-        return fitness_fn
-    
-    def create_validation_fitness_function(
+    def _create_full_batch_fitness_fn(
         self,
         batch_dict: Dict[str, torch.Tensor],
         targets: torch.Tensor,
         chunk_size: int = 64
     ) -> Callable:
         """
-        Create full-dataset fitness function for validation.
+        Create full-batch fitness function for EGGROLL training.
         
-        Evaluates on entire dataset for accurate early stopping decisions.
-        Uses chunked processing to avoid OOM.
+        Evaluates on ENTIRE dataset for stable gradient estimates.
+        Uses chunked forward passes to prevent OOM.
         
         Args:
-            batch_dict: Dict with all data tensors  
+            batch_dict: Dict with all data tensors
             targets: All target values
-            chunk_size: Chunk size for processing (to avoid OOM)
+            chunk_size: Chunk size for forward pass (OOM prevention)
             
         Returns:
-            Fitness function that evaluates on entire dataset
+            Fitness function that evaluates on full dataset
         """
         # Move to device
         batch_dict = {k: v.to(self.device) for k, v in batch_dict.items()}
@@ -327,7 +252,7 @@ class UniMolEGGROLLWrapper:
                     
                     all_preds = torch.cat(all_preds, dim=0)
                     mse = torch.mean((all_preds - targets) ** 2)
-                    return -mse.item()
+                    return -mse.item()  # Negative because higher fitness is better
             
         else:  # classification
             def fitness_fn(model, data):
@@ -355,7 +280,7 @@ class UniMolEGGROLLWrapper:
                             targets.cpu().numpy(), 
                             prob.cpu().numpy()
                         )
-                        return auc
+                        return auc  # AUC is already "higher is better"
                     except:
                         return 0.5
         
@@ -370,13 +295,12 @@ class UniMolEGGROLLWrapper:
         verbose: bool = True
     ) -> Dict[str, Any]:
         """
-        Train model using EGGROLL with mini-batch fitness evaluation.
+        Train model using EGGROLL with full-batch fitness evaluation.
         
-        Uses mini-batch for training fitness (fast) and full evaluation
-        for validation fitness (accurate early stopping).
+        Full-batch provides more stable gradient estimates than mini-batch.
         """
         print(f"\n{'='*60}")
-        print(f"Step 2: EGGROLL Training")
+        print(f"Step 2: EGGROLL Training (Full-Batch)")
         print(f"Dataset: {self.config.dataset_name}")
         print(f"Task: {self.config.task_type}")
         print(f"{'='*60}\n")
@@ -405,14 +329,13 @@ class UniMolEGGROLLWrapper:
         else:
             print(f"\nConfig OK: N*r = {current_Nr} >= {hp_info['max_min_dim']}")
         
-        # Create EGGROLL config
+        # Create EGGROLL config (no batch_size - full-batch mode)
         eggroll_config = EGGROLLConfig(
             population_size=self.config.population_size,
             rank=self.config.rank,
             sigma=self.config.sigma,
             learning_rate=self.config.learning_rate,
             num_generations=self.config.num_generations,
-            batch_size=self.config.batch_size,
             use_antithetic=self.config.use_antithetic,
             normalize_fitness=self.config.normalize_fitness,
             rank_transform=self.config.rank_transform,
@@ -427,17 +350,13 @@ class UniMolEGGROLLWrapper:
         print("\nInitializing EGGROLL optimizer...")
         self.eggroll = EGGROLL(self.model, eggroll_config, device=self.device)
         
-        # Create fitness functions
-        batch_pct = 100 * self.config.batch_size / n_train
-        print(f"Training fitness: mini-batch (batch_size={self.config.batch_size}, {batch_pct:.1f}% of data)")
-        print(f"Validation fitness: full evaluation ({n_valid} samples)")
+        # Create full-batch fitness functions
+        chunk = self.config.eval_chunk_size
+        print(f"Training fitness: FULL-BATCH ({n_train} samples, chunk_size={chunk})")
+        print(f"Validation fitness: FULL-BATCH ({n_valid} samples, chunk_size={chunk})")
         
-        train_fitness_fn = self.create_fitness_function(
-            train_batch, y_train, batch_size=self.config.batch_size
-        )
-        valid_fitness_fn = self.create_validation_fitness_function(
-            valid_batch, y_valid, chunk_size=64
-        )
+        train_fitness_fn = self._create_full_batch_fitness_fn(train_batch, y_train, chunk)
+        valid_fitness_fn = self._create_full_batch_fitness_fn(valid_batch, y_valid, chunk)
         
         # Training history
         history = {
@@ -454,17 +373,19 @@ class UniMolEGGROLLWrapper:
         # Start training
         n_evals = self.config.population_size * 2 if self.config.use_antithetic else self.config.population_size
         print(f"\nStarting EGGROLL training for {self.config.num_generations} generations...")
-        print(f"Each generation: {n_evals} fitness evals × {self.config.batch_size} samples")
+        print(f"Each generation: {n_evals} fitness evals × {n_train} samples (full-batch)")
         print(f"Early stopping patience: {patience}")
+        print(f"Rank transform: {self.config.rank_transform}")
+        print(f"LR decay: {self.config.lr_decay}, Sigma decay: {self.config.sigma_decay}")
         
         import time
         start_time = time.time()
         
         for gen in tqdm(range(self.config.num_generations), desc="Training"):
-            # Perform EGGROLL step
+            # Perform EGGROLL step (full-batch)
             stats = self.eggroll.step(train_fitness_fn, None, verbose=False)
             
-            # Evaluate on validation (full for accurate early stopping)
+            # Evaluate on validation (also full-batch)
             valid_fitness = valid_fitness_fn(self.model, None)
             
             # Record history
@@ -493,6 +414,8 @@ class UniMolEGGROLLWrapper:
                 print(f"Gen {gen+1}: Train {metric_name}={stats['mean_fitness']:.4f}, "
                       f"Valid {metric_name}={valid_fitness:.4f}, "
                       f"Best={best_valid_fitness:.4f}, "
+                      f"LR={self.eggroll.current_lr:.6f}, "
+                      f"σ={self.eggroll.current_sigma:.6f}, "
                       f"ETA={eta/60:.1f}min")
         
         total_time = time.time() - start_time
@@ -531,7 +454,7 @@ class UniMolEGGROLLWrapper:
         self.model.eval()
         all_preds = []
         n_samples = len(targets)
-        chunk_size = 64
+        chunk_size = self.config.eval_chunk_size
         
         with torch.no_grad():
             for i in range(0, n_samples, chunk_size):
@@ -578,6 +501,7 @@ class Step2Trainer:
     Step 2 Trainer: EGGROLL Evolution Strategies.
     
     This replaces gradient descent with EGGROLL for UniMol training.
+    Uses full-batch evaluation for stable gradient estimates.
     """
     
     def __init__(
@@ -610,27 +534,29 @@ class Step2Trainer:
             config['dataset']['name']
         )
         
-        # Create Step2Config
-        eggroll_config = config.get('eggroll', {})
+        # Create Step2Config with TUNED defaults
+        ec = config.get('eggroll', {})
         
         self.step2_config = Step2Config(
             dataset_name=config['dataset']['name'],
             task_type=config['dataset']['task_type'],
             metric=config['dataset']['metric'],
-            population_size=eggroll_config.get('population_size', 128),
-            rank=eggroll_config.get('rank', 4),
-            sigma=eggroll_config.get('sigma', 0.01),
-            learning_rate=eggroll_config.get('learning_rate', 0.05),
-            num_generations=eggroll_config.get('num_generations', 200),
-            batch_size=eggroll_config.get('batch_size', 128),
-            use_antithetic=eggroll_config.get('use_antithetic', True),
-            normalize_fitness=eggroll_config.get('normalize_fitness', True),
-            rank_transform=eggroll_config.get('rank_transform', False),
-            centered_rank=eggroll_config.get('centered_rank', True),
-            weight_decay=eggroll_config.get('weight_decay', 0.0),
-            lr_decay=eggroll_config.get('lr_decay', 1.0),
-            sigma_decay=eggroll_config.get('sigma_decay', 1.0),
-            patience=eggroll_config.get('patience', 50),
+            # TUNED hyperparameters
+            population_size=ec.get('population_size', 32),      # was 128
+            rank=ec.get('rank', 16),                            # was 4
+            sigma=ec.get('sigma', 0.01),                        # keep small!
+            learning_rate=ec.get('learning_rate', 0.1),         # was 0.05
+            num_generations=ec.get('num_generations', 400),     # was 200
+            # Full-batch settings
+            eval_chunk_size=ec.get('eval_chunk_size', 64),      # NEW
+            use_antithetic=ec.get('use_antithetic', True),
+            normalize_fitness=ec.get('normalize_fitness', True),
+            rank_transform=ec.get('rank_transform', True),      # was False
+            centered_rank=ec.get('centered_rank', True),
+            weight_decay=ec.get('weight_decay', 0.0),
+            lr_decay=ec.get('lr_decay', 0.99),                  # was 1.0
+            sigma_decay=ec.get('sigma_decay', 0.99),            # was 1.0
+            patience=ec.get('patience', 200),                   # was 50
             step1_model_path=step1_path,
             output_dir=output_dir,
             use_gpu=config['unimol'].get('use_gpu', True),
@@ -669,7 +595,7 @@ class Step2Trainer:
         self.wrapper = UniMolEGGROLLWrapper(self.step2_config)
         
         # Train
-        print("Training with EGGROLL...")
+        print("Training with EGGROLL (Full-Batch)...")
         train_results = self.wrapper.train(
             train_data,
             valid_data,

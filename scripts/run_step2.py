@@ -3,11 +3,12 @@
 Step 2: Train UniMol with EGGROLL Evolution Strategies
 
 This script replaces gradient descent with EGGROLL for training UniMol models.
+UPDATED: Uses full-batch fitness evaluation (no mini-batch option).
 
 Usage:
     python scripts/run_step2.py --dataset esol
     python scripts/run_step2.py --dataset all
-    python scripts/run_step2.py --dataset esol --batch_size 64
+    python scripts/run_step2.py --dataset esol --population_size 32 --rank 16
 """
 
 import os
@@ -51,7 +52,7 @@ def run_step2(
     sigma: float = None,
     learning_rate: float = None,
     num_generations: int = None,
-    batch_size: int = None,
+    eval_chunk_size: int = None,
     patience: int = None,
     weight_decay: float = None,
     rank_transform: bool = None,
@@ -63,7 +64,7 @@ def run_step2(
     from src.trainers.step2_eggroll import Step2Trainer
     
     print(f"\n{'='*60}")
-    print(f"Step 2: EGGROLL Training for {dataset_name}")
+    print(f"Step 2: EGGROLL Training (Full-Batch) for {dataset_name}")
     print(f"Start time: {datetime.now()}")
     print(f"{'='*60}")
     
@@ -81,8 +82,8 @@ def run_step2(
         config['eggroll']['learning_rate'] = learning_rate
     if num_generations is not None:
         config['eggroll']['num_generations'] = num_generations
-    if batch_size is not None:
-        config['eggroll']['batch_size'] = batch_size
+    if eval_chunk_size is not None:
+        config['eggroll']['eval_chunk_size'] = eval_chunk_size
     if patience is not None:
         config['eggroll']['patience'] = patience
     if weight_decay is not None:
@@ -95,7 +96,7 @@ def run_step2(
         config['eggroll']['sigma_decay'] = sigma_decay
     
     # Print EGGROLL config
-    print("\nEGGROLL Configuration:")
+    print("\nEGGROLL Configuration (Full-Batch Mode):")
     for key, value in config['eggroll'].items():
         print(f"  {key}: {value}")
     
@@ -104,7 +105,7 @@ def run_step2(
     train_data, valid_data, test_data = loader.load()
     
     print(f"\nData loaded:")
-    print(f"  Train: {len(train_data)} samples")
+    print(f"  Train: {len(train_data)} samples (full-batch)")
     print(f"  Valid: {len(valid_data)} samples")
     print(f"  Test: {len(test_data)} samples")
     
@@ -128,7 +129,7 @@ def run_step2(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Step 2: Train UniMol with EGGROLL Evolution Strategies"
+        description="Step 2: Train UniMol with EGGROLL Evolution Strategies (Full-Batch)"
     )
     parser.add_argument(
         '--dataset',
@@ -141,43 +142,43 @@ def main():
         '--population_size', '-N',
         type=int,
         default=None,
-        help='Population size (number of perturbations)'
+        help='Population size (number of perturbations, default: 32)'
     )
     parser.add_argument(
         '--rank', '-r',
         type=int,
         default=None,
-        help='Rank of low-rank perturbations'
+        help='Rank of low-rank perturbations (default: 16)'
     )
     parser.add_argument(
         '--sigma', '-s',
         type=float,
         default=None,
-        help='Noise scale for perturbations'
+        help='Noise scale for perturbations (default: 0.01)'
     )
     parser.add_argument(
         '--learning_rate', '-lr',
         type=float,
         default=None,
-        help='Learning rate (step size)'
+        help='Learning rate (step size, default: 0.1)'
     )
     parser.add_argument(
         '--num_generations', '-g',
         type=int,
         default=None,
-        help='Number of evolution generations'
+        help='Number of evolution generations (default: 400)'
     )
     parser.add_argument(
-        '--batch_size', '-b',
+        '--eval_chunk_size', '-c',
         type=int,
         default=None,
-        help='Batch size for fitness evaluation'
+        help='Chunk size for forward pass to avoid OOM (default: 64)'
     )
     parser.add_argument(
         '--patience', '-p',
         type=int,
         default=None,
-        help='Early stopping patience (default: 50)'
+        help='Early stopping patience (default: 200)'
     )
     parser.add_argument(
         '--weight_decay', '-wd',
@@ -188,22 +189,34 @@ def main():
     parser.add_argument(
         '--rank_transform',
         action='store_true',
-        help='Use rank-based fitness shaping (more stable than z-score)'
+        help='Use rank-based fitness shaping (default: True)'
+    )
+    parser.add_argument(
+        '--no_rank_transform',
+        action='store_true',
+        help='Disable rank-based fitness shaping'
     )
     parser.add_argument(
         '--lr_decay',
         type=float,
         default=None,
-        help='Learning rate decay per generation (default: 1.0)'
+        help='Learning rate decay per generation (default: 0.99)'
     )
     parser.add_argument(
         '--sigma_decay',
         type=float,
         default=None,
-        help='Sigma decay per generation (default: 1.0)'
+        help='Sigma decay per generation (default: 0.99)'
     )
     
     args = parser.parse_args()
+    
+    # Handle rank_transform flag
+    rank_transform = None
+    if args.rank_transform:
+        rank_transform = True
+    elif args.no_rank_transform:
+        rank_transform = False
     
     # Datasets to run
     if args.dataset == 'all':
@@ -223,10 +236,10 @@ def main():
                 sigma=args.sigma,
                 learning_rate=args.learning_rate,
                 num_generations=args.num_generations,
-                batch_size=args.batch_size,
+                eval_chunk_size=args.eval_chunk_size,
                 patience=args.patience,
                 weight_decay=args.weight_decay,
-                rank_transform=args.rank_transform if args.rank_transform else None,
+                rank_transform=rank_transform,
                 lr_decay=args.lr_decay,
                 sigma_decay=args.sigma_decay
             )
@@ -239,7 +252,7 @@ def main():
     
     # Print summary
     print(f"\n{'='*60}")
-    print(f"         Step 2 Summary - EGGROLL Results          ")
+    print(f"         Step 2 Summary - EGGROLL Results (Full-Batch)          ")
     print(f"{'='*60}\n")
     
     print("-" * 60)
